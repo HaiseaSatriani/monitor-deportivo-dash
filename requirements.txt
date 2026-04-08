@@ -1,0 +1,8 @@
+dash==2.18.2
+dash-bootstrap-components
+pandas
+numpy
+scipy
+plotly
+sqlalchemy
+werkzeug
