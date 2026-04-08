@@ -1,11 +1,5 @@
 """
 callbacks/athlete_cb.py — Callbacks del Dashboard del Atleta — Athletica Pro
-Incluye sección Métricas completamente rediseñada:
-  • KPIs avanzados (VO2max estimado, HRV, pace, cadencia, potencia, TSS, eficiencia)
-  • 8 gráficas profesionales con descarga individual a CSV
-  • Upload de CSV externo (Garmin/Strava/Wahoo) con visualización dinámica
-  • Tabs por disciplina (Global / Running / Ciclismo / Natación)
-  • ACWR con barra visual
 """
 import base64
 import io
@@ -44,7 +38,6 @@ _LAYOUT_BASE = dict(
     yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.04)",
                showline=False, tickfont=dict(color="#6B7280"), zeroline=False),
 )
-# Default margin — used where no custom margin is needed
 _MARGIN = dict(l=40, r=20, t=10, b=40)
 
 WORKOUT_ICONS = {
@@ -93,7 +86,6 @@ def _zone_label(avg_hr, max_hr=190):
 
 
 def _pace_str(pace_decimal):
-    """Convierte pace decimal (min/km) a string mm:ss."""
     if not pace_decimal or pace_decimal <= 0:
         return "—"
     mins = int(pace_decimal)
@@ -102,7 +94,6 @@ def _pace_str(pace_decimal):
 
 
 def _estimate_vo2max(workouts):
-    """Estimación VO2max basada en pace y FC (fórmula simplificada de Uth et al.)."""
     running = [w for w in workouts if w.get("workout_type") in
                ("carrera_facil","intervalos","tempo","trail") and
                w.get("avg_hr", 0) and w.get("pace_min_km", 0)]
@@ -110,23 +101,18 @@ def _estimate_vo2max(workouts):
         return 45.0
     avg_hr_vals = [w["avg_hr"] for w in running[-5:]]
     avg_hr = sum(avg_hr_vals) / len(avg_hr_vals)
-    # Uth et al. simplified: VO2max ≈ 15 * (HRmax / HRrest)
-    # Aproximamos con datos disponibles
     resting_hr = 55
     max_hr = 190
     vo2 = 15 * (max_hr / resting_hr)
-    # Ajuste por ritmo promedio
     paces = [w["pace_min_km"] for w in running[-5:] if w.get("pace_min_km", 0) > 0]
     if paces:
         avg_pace = sum(paces) / len(paces)
-        # Mejor pace → mayor VO2max
         pace_bonus = max(0, (6.5 - avg_pace) * 2)
         vo2 += pace_bonus
     return round(min(85, max(30, vo2)), 1)
 
 
 def _calculate_tss(workouts, week=True):
-    """Calcula TSS (Training Stress Score) acumulado."""
     if week:
         cutoff = datetime.now() - timedelta(days=7)
     else:
@@ -140,7 +126,6 @@ def _calculate_tss(workouts, week=True):
                 continue
         except Exception:
             continue
-        # TSS = (duration_h * IF² * 100) — IF basado en RPE/10
         dur_h  = (w.get("duration_min", 45) or 45) / 60
         rpe    = w.get("rpe", 5) or 5
         if_val = rpe / 10
@@ -333,11 +318,100 @@ def register(app):
         return (str(last_bpm), zone_label, str(last_cal), f"{week_cal} kcal semana",
                 f"{liters:.1f}L", f"de {goal:.1f}L objetivo", recent_items)
 
+    # ── INICIO: Resumen semana + Greeting ─────────────────────
+    @app.callback(
+        [Output("inicio-greeting",    "children"),
+         Output("inicio-week-summary","children")],
+        [Input("url", "pathname"), Input("current-user", "data")],
+        prevent_initial_call=True,
+    )
+    def update_inicio_greeting(pathname, current_user):
+        if pathname != "/inicio" or not current_user:
+            raise dash.exceptions.PreventUpdate
+
+        from db import get_workout_history, get_workout_stats
+
+        hour = datetime.now().hour
+        saludo = "¡Buenos días" if hour < 12 else ("¡Buenas tardes" if hour < 19 else "¡Buenas noches")
+        greeting = html.Div([
+            html.Div(f"{saludo}, {current_user}! 👋", style={
+                "fontFamily": "var(--font-display)", "fontSize": "1.8rem",
+                "fontWeight": "900", "color": WHITE, "lineHeight": "1.1",
+            }),
+            html.Div("Aquí tienes tu resumen del día.", style={
+                "color": MUTED, "fontSize": "0.9rem", "marginTop": "4px",
+            }),
+        ])
+
+        workouts = get_workout_history(current_user, limit=30)
+        stats    = get_workout_stats(current_user)
+        week     = stats.get("week", {})
+
+        cutoff = datetime.now() - timedelta(days=7)
+        week_workouts = []
+        for w in workouts:
+            try:
+                d = datetime.strptime(w.get("workout_date",""), "%Y-%m-%d")
+                if d >= cutoff:
+                    week_workouts.append(w)
+            except Exception:
+                pass
+
+        disc_map = {
+            "carrera_facil":"🏃 Running","intervalos":"🏃 Running","tempo":"🏃 Running","trail":"🏃 Running",
+            "ciclismo":"🚴 Ciclismo","natacion":"🏊 Natación","fuerza":"💪 Fuerza",
+            "hiit":"🔥 HIIT","yoga":"🧘 Yoga","recuperacion":"🔄 Recuperación",
+            "cardio":"❤️ Cardio","otro":"🏅 Otro",
+        }
+        disc_stats = {}
+        for w in week_workouts:
+            disc = disc_map.get(w.get("workout_type","otro"), "🏅 Otro")
+            if disc not in disc_stats:
+                disc_stats[disc] = {"sessions": 0, "km": 0, "min": 0, "cal": 0}
+            disc_stats[disc]["sessions"] += 1
+            disc_stats[disc]["km"]       += w.get("distance_km", 0) or 0
+            disc_stats[disc]["min"]      += w.get("duration_min", 0) or 0
+            disc_stats[disc]["cal"]      += w.get("calories_burned", 0) or 0
+
+        if not disc_stats:
+            week_summary = html.Div(
+                "Sin entrenamientos esta semana. ¡A moverse! 💪",
+                style={"color": MUTED, "fontSize": "0.88rem", "padding": "8px 0"},
+            )
+        else:
+            rows = []
+            for disc, s in disc_stats.items():
+                rows.append(html.Div(style={
+                    "display": "flex", "alignItems": "center", "gap": "12px",
+                    "padding": "10px 0",
+                    "borderBottom": "1px solid rgba(255,255,255,0.05)",
+                }, children=[
+                    html.Span(disc, style={"flex":"1","fontWeight":"700","color":WHITE,"fontSize":"0.9rem"}),
+                    html.Span(f"{s['sessions']} ses.", style={"color":LIME,"fontSize":"0.82rem","fontWeight":"700","minWidth":"48px","textAlign":"right"}),
+                    html.Span(f"{s['km']:.1f} km" if s["km"] > 0 else f"{s['min']} min",
+                              style={"color":CYAN,"fontSize":"0.82rem","minWidth":"60px","textAlign":"right"}),
+                    html.Span(f"{s['cal']} kcal", style={"color":ORANGE,"fontSize":"0.82rem","minWidth":"60px","textAlign":"right"}),
+                ]))
+            total_ses = sum(s["sessions"] for s in disc_stats.values())
+            total_km  = sum(s["km"]       for s in disc_stats.values())
+            total_cal = sum(s["cal"]      for s in disc_stats.values())
+            rows.append(html.Div(style={
+                "display":"flex","alignItems":"center","gap":"12px",
+                "padding":"10px 0","borderTop":"2px solid rgba(232,255,71,0.2)","marginTop":"4px",
+            }, children=[
+                html.Span("TOTAL SEMANA", style={"flex":"1","fontWeight":"900","color":LIME,"fontSize":"0.8rem","letterSpacing":"0.5px"}),
+                html.Span(f"{total_ses} ses.", style={"color":LIME,"fontSize":"0.82rem","fontWeight":"700","minWidth":"48px","textAlign":"right"}),
+                html.Span(f"{total_km:.1f} km", style={"color":CYAN,"fontSize":"0.82rem","minWidth":"60px","textAlign":"right"}),
+                html.Span(f"{total_cal} kcal", style={"color":ORANGE,"fontSize":"0.82rem","minWidth":"60px","textAlign":"right"}),
+            ]))
+            week_summary = html.Div(rows)
+
+        return greeting, week_summary
+
     # ══════════════════════════════════════════════════════════
-    # SECCIÓN MÉTRICAS — CALLBACKS NUEVOS
+    # SECCIÓN MÉTRICAS
     # ══════════════════════════════════════════════════════════
 
-    # ── Tabs de disciplina ────────────────────────────────────
     @app.callback(
         [Output("metrics-tab-global",  "style"),
          Output("metrics-tab-running", "style"),
@@ -371,10 +445,8 @@ def register(app):
         return (_style("metrics-tab-global"), _style("metrics-tab-running"),
                 _style("metrics-tab-cycling"), _style("metrics-tab-swimming"), active)
 
-    # ── KPIs avanzados + mini-stats + 8 gráficas ─────────────
     @app.callback(
         [
-            # KPIs avanzados
             Output("adv-kpi-vo2",        "children"),
             Output("adv-kpi-hrv",        "children"),
             Output("adv-kpi-pace",       "children"),
@@ -383,13 +455,11 @@ def register(app):
             Output("adv-kpi-tss",        "children"),
             Output("adv-kpi-efficiency", "children"),
             Output("adv-kpi-fatigue",    "children"),
-            # Mini stats semana
             Output("stat-sessions",      "children"),
             Output("stat-km",            "children"),
             Output("stat-time",          "children"),
             Output("stat-cal-week",      "children"),
             Output("stat-avg-rpe",       "children"),
-            # Gráficas
             Output("chart-weekly-load",      "figure"),
             Output("chart-hr-zones",         "figure"),
             Output("chart-pace-trend",       "figure"),
@@ -399,7 +469,6 @@ def register(app):
             Output("chart-resting-hr",       "figure"),
             Output("chart-hr-efficiency",    "figure"),
             Output("chart-hrv-trend",        "figure"),
-            # ACWR
             Output("acwr-ratio-display", "children"),
             Output("acwr-status-label",  "children"),
             Output("acwr-bar-container", "style"),
@@ -419,7 +488,6 @@ def register(app):
 
         all_workouts = get_workout_history(current_user, limit=60)
 
-        # Filtro por tab
         DISC_FILTER = {
             "running":  ("carrera_facil","intervalos","tempo","trail"),
             "cycling":  ("ciclismo",),
@@ -434,7 +502,6 @@ def register(app):
         stats = get_workout_stats(current_user)
         week  = stats.get("week", {})
 
-        # ── Mini stats
         s_sessions = str(week.get("total_sessions") or 0)
         s_km       = f"{(week.get('total_km') or 0):.1f}"
         total_min  = week.get("total_min") or 0
@@ -442,7 +509,6 @@ def register(app):
         s_cal      = str(int(week.get("total_cal") or 0))
         s_rpe      = f"{(week.get('avg_rpe') or 0):.1f}"
 
-        # ── KPIs avanzados
         vo2     = _estimate_vo2max(workouts)
         tss     = _calculate_tss(workouts, week=True)
 
@@ -452,22 +518,18 @@ def register(app):
         avg_pace = (sum(w["pace_min_km"] for w in running_w[-10:]) / len(running_w[-10:])
                     if running_w else 0)
 
-        # Cadencia media (simulada si no hay dato directo)
         cadence_workouts = [w for w in workouts if w.get("cadence", 0)]
         avg_cadence = (sum(w["cadence"] for w in cadence_workouts) / len(cadence_workouts)
                        if cadence_workouts else random.randint(168, 178))
 
-        # Potencia media (ciclismo)
         power_workouts = [w for w in workouts if w.get("power_w", 0)]
         avg_power = (sum(w["power_w"] for w in power_workouts) / len(power_workouts)
                      if power_workouts else "—")
 
-        # HRV simulado basado en fatiga
         recent_rpe = [w.get("rpe", 5) for w in workouts[:5]] if workouts else [5]
         avg_recent_rpe = sum(recent_rpe) / len(recent_rpe)
         hrv_sim = round(max(20, 85 - avg_recent_rpe * 5 + random.uniform(-3, 3)), 1)
 
-        # Eficiencia FC: pace / FC ratio (menor = más eficiente)
         eff_workouts = [w for w in running_w if w.get("avg_hr", 0)]
         if eff_workouts:
             eff_vals = [w.get("pace_min_km", 6) / (w.get("avg_hr", 160) / 100)
@@ -476,12 +538,10 @@ def register(app):
         else:
             eff = "—"
 
-        # Índice fatiga (ACWR basado)
         load   = calculate_training_load(all_workouts)
         ratio  = load.get("ratio", 1.0)
         fatigue_idx = round(max(0, min(10, (ratio - 0.8) * 12.5)), 1)
 
-        # ── ACWR
         status = load.get("status", "optimal")
         status_map = {
             "optimal":       ("Óptimo ✓",       LIME),
@@ -489,7 +549,6 @@ def register(app):
             "overload_risk": ("Riesgo fatiga ⚠", RED),
         }
         status_text, status_color = status_map.get(status, ("Óptimo", LIME))
-        # Posición en barra: ratio 0.5→0%, 1.5→100%
         acwr_pct = min(98, max(2, (ratio - 0.5) * 100))
         acwr_bar_style = {
             'position':'absolute','top':'0','bottom':'0','width':'4px',
@@ -497,7 +556,7 @@ def register(app):
             'left':f'{acwr_pct:.0f}%','transition':'left 0.6s ease',
         }
 
-        # ── Gráfica 1: Carga semanal (barras)
+        # ── Gráfica 1: Carga semanal
         weeks_data = {}
         for w in workouts:
             date = w.get("workout_date", "")
@@ -530,7 +589,7 @@ def register(app):
                         tickfont=dict(color=CYAN, size=9), zeroline=False),
         )
 
-        # ── Gráfica 2: Zonas FC (donut)
+        # ── Gráfica 2: Zonas FC
         zone_counts  = {"Z1":0,"Z2":0,"Z3":0,"Z4":0,"Z5":0}
         zone_colors  = {"Z1":"#4FC3F7","Z2":GREEN,"Z3":LIME,"Z4":ORANGE,"Z5":RED}
         for w in workouts:
@@ -549,7 +608,7 @@ def register(app):
                                             orientation="v", x=1.02, y=0.5),
                                 margin=dict(l=0,r=60,t=10,b=10), **_LAYOUT_BASE)
 
-        # ── Gráfica 3: Tendencia pace (running)
+        # ── Gráfica 3: Pace trend
         pace_data = [(w.get("workout_date",""), w.get("pace_min_km",0))
                      for w in reversed(workouts)
                      if w.get("workout_date") and w.get("pace_min_km", 0) > 0][-20:]
@@ -564,13 +623,11 @@ def register(app):
         fig_pace.add_trace(go.Scatter(
             x=p_dates, y=p_values, mode="lines+markers",
             text=p_labels, hovertemplate="%{text}<extra></extra>",
-            line=dict(color=GREEN, width=2),
-            marker=dict(color=GREEN, size=6),
+            line=dict(color=GREEN, width=2), marker=dict(color=GREEN, size=6),
             fill="tozeroy", fillcolor="rgba(129,199,132,0.05)",
         ))
         fig_pace.update_layout(**_LAYOUT_BASE, margin=_MARGIN,
-                               yaxis=dict(autorange="reversed",
-                                          tickformat=".1f",
+                               yaxis=dict(autorange="reversed", tickformat=".1f",
                                           gridcolor="rgba(255,255,255,0.04)",
                                           tickfont=dict(color="#6B7280"),
                                           showline=False, zeroline=False))
@@ -588,7 +645,7 @@ def register(app):
         ))
         fig_rpe.update_layout(**_LAYOUT_BASE, margin=_MARGIN)
 
-        # ── Gráfica 5: Mood bars
+        # ── Gráfica 5: Mood
         mood_map  = {"excelente":5,"bien":4,"regular":3,"cansado":2,"agotado":1}
         mood_data = [(w.get("workout_date",""), mood_map.get(w.get("mood","regular"),3))
                      for w in reversed(workouts) if w.get("workout_date")][-15:]
@@ -603,7 +660,7 @@ def register(app):
                                           tickfont=dict(color="#6B7280",size=9),
                                           gridcolor="rgba(255,255,255,0.04)"))
 
-        # ── Gráfica 6: Volumen por disciplina (barras apiladas)
+        # ── Gráfica 6: Volumen por disciplina
         disc_map = {"carrera_facil":"Running","intervalos":"Running","tempo":"Running","trail":"Running",
                     "ciclismo":"Ciclismo","natacion":"Natación","fuerza":"Fuerza","hiit":"HIIT",
                     "yoga":"Yoga","recuperacion":"Recuperación","cardio":"Cardio","otro":"Otro"}
@@ -611,12 +668,10 @@ def register(app):
         for w in workouts:
             disc = disc_map.get(w.get("workout_type","otro"), "Otro")
             disc_km[disc] = disc_km.get(disc, 0) + (w.get("distance_km", 0) or 0)
-        disc_labels  = list(disc_km.keys())
-        disc_vals    = list(disc_km.values())
         disc_color_m = {"Running":LIME,"Ciclismo":CYAN,"Natación":"#4FC3F7","Fuerza":ORANGE,
                         "HIIT":RED,"Yoga":GREEN,"Recuperación":PURPLE}
         fig_vol = go.Figure()
-        for disc, km_val in zip(disc_labels, disc_vals):
+        for disc, km_val in disc_km.items():
             if km_val > 0:
                 fig_vol.add_trace(go.Bar(
                     name=disc, x=[disc], y=[km_val],
@@ -624,8 +679,7 @@ def register(app):
                 ))
         fig_vol.update_layout(**_LAYOUT_BASE, showlegend=False, bargap=0.35, margin=_MARGIN)
 
-        # ── Gráfica 7: FC Reposo tendencia (simulado con HRV)
-        # Usamos datos de workouts + tendencia sintética
+        # ── Gráfica 7: FC Reposo
         rhr_dates  = []
         rhr_values = []
         for w in sorted(workouts, key=lambda x: x.get("workout_date",""))[-20:]:
@@ -639,13 +693,12 @@ def register(app):
         fig_rhr = go.Figure()
         fig_rhr.add_trace(go.Scatter(
             x=rhr_dates, y=rhr_values, mode="lines+markers",
-            line=dict(color="#4FC3F7", width=2),
-            marker=dict(color="#4FC3F7", size=5),
+            line=dict(color="#4FC3F7", width=2), marker=dict(color="#4FC3F7", size=5),
             fill="tozeroy", fillcolor="rgba(79,195,247,0.05)",
         ))
         fig_rhr.update_layout(**_LAYOUT_BASE, margin=_MARGIN)
 
-        # ── Gráfica 8: Eficiencia FC (pace / FC × 100)
+        # ── Gráfica 8: Eficiencia FC
         eff_dates  = []
         eff_values = []
         for w in sorted(running_w, key=lambda x: x.get("workout_date",""))[-20:]:
@@ -659,21 +712,18 @@ def register(app):
         fig_eff = go.Figure()
         fig_eff.add_trace(go.Scatter(
             x=eff_dates, y=eff_values, mode="lines+markers",
-            line=dict(color=ORANGE, width=2),
-            marker=dict(color=ORANGE, size=6),
+            line=dict(color=ORANGE, width=2), marker=dict(color=ORANGE, size=6),
         ))
         fig_eff.add_hline(y=3.5, line_dash="dot", line_color="rgba(255,255,255,0.2)",
                           annotation_text="óptimo", annotation_font_color="#6B7280",
                           annotation_font_size=10)
-        fig_eff.update_layout(**_LAYOUT_BASE, margin=_MARGIN,
-                              yaxis=dict(title="ratio FC/pace", gridcolor="rgba(255,255,255,0.04)",
-                                         tickfont=dict(color="#6B7280"), zeroline=False, showline=False))
+        fig_eff.update_layout(**_LAYOUT_BASE, margin=_MARGIN)
 
-        # ── Gráfica 9: HRV tendencia
+        # ── Gráfica 9: HRV
         hrv_dates  = []
         hrv_values = []
         baseline_hrv = 70
-        for i, w in enumerate(sorted(workouts, key=lambda x: x.get("workout_date",""))[-30:]):
+        for w in sorted(workouts, key=lambda x: x.get("workout_date",""))[-30:]:
             date = w.get("workout_date","")
             if not date: continue
             rpe_w    = w.get("rpe",5) or 5
@@ -694,22 +744,18 @@ def register(app):
         fig_hrv.update_layout(**_LAYOUT_BASE, margin=_MARGIN)
 
         return (
-            # KPIs avanzados
             f"{vo2}", f"{hrv_sim} ms", _pace_str(avg_pace),
             f"{avg_cadence}", f"{avg_power}W" if isinstance(avg_power, float) else "—",
             f"{tss:.0f}", f"{eff:.2f}" if isinstance(eff, float) else "—", f"{fatigue_idx}/10",
-            # Mini stats
             s_sessions, s_km, s_time, s_cal, s_rpe,
-            # Gráficas
             fig_load, fig_zones, fig_pace, fig_rpe,
             fig_mood, fig_vol, fig_rhr, fig_eff, fig_hrv,
-            # ACWR
             html.Span(f"{ratio:.2f}", style={"color": status_color}),
             html.Span(status_text,    style={"color": status_color}),
             acwr_bar_style,
         )
 
-    # ── CSV Upload — procesar y mostrar ───────────────────────
+    # ── CSV Upload ────────────────────────────────────────────
     @app.callback(
         [Output("metrics-csv-store",           "data"),
          Output("metrics-csv-column-selector", "options"),
@@ -730,7 +776,6 @@ def register(app):
             if df.empty:
                 return (dash.no_update, [], None,
                         html.Span("❌ CSV vacío.", style={"color": RED}))
-            # Solo columnas numéricas para la gráfica
             numeric_cols = df.select_dtypes(include="number").columns.tolist()
             options = [{"label": c, "value": c} for c in numeric_cols]
             default = numeric_cols[0] if numeric_cols else None
@@ -744,7 +789,6 @@ def register(app):
             return (dash.no_update, [], None,
                     html.Span(f"❌ Error: {str(e)[:60]}", style={"color": RED}))
 
-    # ── CSV Upload — renderizar gráfica ───────────────────────
     @app.callback(
         [Output("uploaded-csv-chart-wrap",    "style"),
          Output("chart-custom-upload",        "figure"),
@@ -766,44 +810,36 @@ def register(app):
             if col.empty:
                 return {"display":"none"}, _empty_fig("Sin datos en esta columna"), "", [], []
 
-            # Eje X: fecha si existe, índice si no
             date_cols = [c for c in df.columns if "date" in c.lower() or "time" in c.lower() or "fecha" in c.lower()]
             x_vals = df[date_cols[0]].values if date_cols else df.index.values
 
             fig = go.Figure()
             color = LIME
             if chart_type == "bar":
-                fig.add_trace(go.Bar(x=x_vals, y=col.values,
-                                     marker=dict(color=LIME, opacity=0.85)))
+                fig.add_trace(go.Bar(x=x_vals, y=col.values, marker=dict(color=LIME, opacity=0.85)))
             elif chart_type == "scatter":
                 fig.add_trace(go.Scatter(x=x_vals, y=col.values, mode="markers",
                                          marker=dict(color=CYAN, size=7, opacity=0.8)))
                 color = CYAN
             elif chart_type == "area":
                 fig.add_trace(go.Scatter(x=x_vals, y=col.values, mode="lines",
-                                         fill="tozeroy",
-                                         line=dict(color=PURPLE, width=2),
+                                         fill="tozeroy", line=dict(color=PURPLE, width=2),
                                          fillcolor="rgba(156,136,255,0.07)"))
                 color = PURPLE
-            else:  # line
+            else:
                 fig.add_trace(go.Scatter(x=x_vals, y=col.values, mode="lines+markers",
-                                         line=dict(color=GREEN, width=2),
-                                         marker=dict(color=GREEN, size=5)))
+                                         line=dict(color=GREEN, width=2), marker=dict(color=GREEN, size=5)))
                 color = GREEN
 
-            # Media móvil 7 puntos
             if len(col) >= 7:
-                import pandas as pd
                 ma = pd.Series(col.values).rolling(7, min_periods=1).mean()
                 fig.add_trace(go.Scatter(
-                    x=x_vals, y=ma.values, mode="lines",
-                    name="Media 7 sesiones",
+                    x=x_vals, y=ma.values, mode="lines", name="Media 7 sesiones",
                     line=dict(color="rgba(255,255,255,0.3)", width=1.5, dash="dot"),
                 ))
 
             fig.update_layout(**_LAYOUT_BASE, margin=_MARGIN, showlegend=len(col) >= 7)
 
-            # Estadísticas resumen
             stats_items = [
                 html.Div(style={'background':DARK3,'borderRadius':'8px','padding':'8px 14px','textAlign':'center'}, children=[
                     html.Div(f"{v:.2f}" if isinstance(v, float) else str(v),
@@ -820,7 +856,6 @@ def register(app):
             ]
             stats_row = html.Div(stats_items, style={'display':'flex','gap':'8px','flexWrap':'wrap'})
 
-            # Tabla preview (primeras 8 filas, columnas numéricas)
             preview_cols = df.select_dtypes(include="number").columns.tolist()[:6]
             header = html.Tr([html.Th(c, style={'color':MUTED,'fontSize':'0.72rem','padding':'6px 10px',
                                                  'textTransform':'uppercase','fontWeight':'600'})
@@ -845,7 +880,6 @@ def register(app):
         except Exception as e:
             return {"display":"none"}, _empty_fig(f"Error: {str(e)[:50]}"), "", [], []
 
-    # ── Descarga CSV procesado ────────────────────────────────
     @app.callback(
         Output("download-custom-csv", "data"),
         Input("btn-dl-custom-csv",    "n_clicks"),
@@ -858,7 +892,7 @@ def register(app):
         df = pd.read_json(io.StringIO(store_data), orient="split")
         return dcc.send_data_frame(df.to_csv, "athletica_datos.csv", index=False)
 
-    # ── Descargas individuales de cada gráfica ────────────────
+    # ── Descargas gráficas ────────────────────────────────────
     _CHART_DOWNLOADS = [
         ("btn-dl-weekly-load", "dl-weekly-load",  "carga_semanal.csv"),
         ("btn-dl-hr-zones",    "dl-hr-zones",      "zonas_fc.csv"),
@@ -979,7 +1013,6 @@ def register(app):
         return (html.Span("✅ ¡Sesión registrada!", style={"color": LIME}),
                 _render_workout_history(workouts), False)
 
-    # ── HISTORIAL ─────────────────────────────────────────────
     @app.callback(
         [Output("workout-history-list","children", allow_duplicate=True),
          Output("month-stats-panel",  "children"),
@@ -1333,94 +1366,4 @@ def _render_goals_summary(goals):
             html.Span(str(completed), className="goals-stat-num", style={"color":CYAN}),
             html.Span("Completados",  className="goals-stat-label"),
         ]),
-    ]    # ── INICIO: Resumen semana + Greeting ───────────────────────
-    @app.callback(
-        [Output("inicio-greeting",    "children"),
-         Output("inicio-week-summary","children")],
-        [Input("url", "pathname"), Input("current-user", "data")],
-        prevent_initial_call=True,
-    )
-    def update_inicio_greeting(pathname, current_user):
-        if pathname != "/inicio" or not current_user:
-            raise dash.exceptions.PreventUpdate
-
-        from db import get_workout_history, get_workout_stats
-
-        hour = datetime.now().hour
-        saludo = "¡Buenos días" if hour < 12 else ("¡Buenas tardes" if hour < 19 else "¡Buenas noches")
-        greeting = html.Div([
-            html.Div(f"{saludo}, {current_user}! 👋", style={
-                "fontFamily": "var(--font-display)", "fontSize": "1.8rem",
-                "fontWeight": "900", "color": WHITE, "lineHeight": "1.1",
-            }),
-            html.Div("Aquí tienes tu resumen del día.", style={
-                "color": MUTED, "fontSize": "0.9rem", "marginTop": "4px",
-            }),
-        ])
-
-        workouts = get_workout_history(current_user, limit=30)
-        stats    = get_workout_stats(current_user)
-        week     = stats.get("week", {})
-
-        # Contar disciplinas esta semana
-        cutoff = datetime.now() - timedelta(days=7)
-        week_workouts = []
-        for w in workouts:
-            try:
-                d = datetime.strptime(w.get("workout_date",""), "%Y-%m-%d")
-                if d >= cutoff:
-                    week_workouts.append(w)
-            except Exception:
-                pass
-
-        disc_map = {
-            "carrera_facil":"🏃 Running","intervalos":"🏃 Running","tempo":"🏃 Running","trail":"🏃 Running",
-            "ciclismo":"🚴 Ciclismo","natacion":"🏊 Natación","fuerza":"💪 Fuerza",
-            "hiit":"🔥 HIIT","yoga":"🧘 Yoga","recuperacion":"🔄 Recuperación",
-            "cardio":"❤️ Cardio","otro":"🏅 Otro",
-        }
-        disc_stats = {}
-        for w in week_workouts:
-            disc = disc_map.get(w.get("workout_type","otro"), "🏅 Otro")
-            if disc not in disc_stats:
-                disc_stats[disc] = {"sessions": 0, "km": 0, "min": 0, "cal": 0}
-            disc_stats[disc]["sessions"] += 1
-            disc_stats[disc]["km"]       += w.get("distance_km", 0) or 0
-            disc_stats[disc]["min"]      += w.get("duration_min", 0) or 0
-            disc_stats[disc]["cal"]      += w.get("calories_burned", 0) or 0
-
-        if not disc_stats:
-            week_summary = html.Div(
-                "Sin entrenamientos esta semana. ¡A moverse! 💪",
-                style={"color": MUTED, "fontSize": "0.88rem", "padding": "8px 0"},
-            )
-        else:
-            rows = []
-            for disc, s in disc_stats.items():
-                rows.append(html.Div(style={
-                    "display": "flex", "alignItems": "center", "gap": "12px",
-                    "padding": "10px 0",
-                    "borderBottom": "1px solid rgba(255,255,255,0.05)",
-                }, children=[
-                    html.Span(disc, style={"flex":"1","fontWeight":"700","color":WHITE,"fontSize":"0.9rem"}),
-                    html.Span(f"{s['sessions']} ses.", style={"color":LIME,"fontSize":"0.82rem","fontWeight":"700","minWidth":"48px","textAlign":"right"}),
-                    html.Span(f"{s['km']:.1f} km" if s["km"] > 0 else f"{s['min']} min",
-                              style={"color":CYAN,"fontSize":"0.82rem","minWidth":"60px","textAlign":"right"}),
-                    html.Span(f"{s['cal']} kcal", style={"color":ORANGE,"fontSize":"0.82rem","minWidth":"60px","textAlign":"right"}),
-                ]))
-            # Totales
-            total_ses = sum(s["sessions"] for s in disc_stats.values())
-            total_km  = sum(s["km"]       for s in disc_stats.values())
-            total_cal = sum(s["cal"]      for s in disc_stats.values())
-            rows.append(html.Div(style={
-                "display":"flex","alignItems":"center","gap":"12px",
-                "padding":"10px 0","borderTop":"2px solid rgba(232,255,71,0.2)","marginTop":"4px",
-            }, children=[
-                html.Span("TOTAL SEMANA", style={"flex":"1","fontWeight":"900","color":LIME,"fontSize":"0.8rem","letterSpacing":"0.5px"}),
-                html.Span(f"{total_ses} ses.", style={"color":LIME,"fontSize":"0.82rem","fontWeight":"700","minWidth":"48px","textAlign":"right"}),
-                html.Span(f"{total_km:.1f} km", style={"color":CYAN,"fontSize":"0.82rem","minWidth":"60px","textAlign":"right"}),
-                html.Span(f"{total_cal} kcal", style={"color":ORANGE,"fontSize":"0.82rem","minWidth":"60px","textAlign":"right"}),
-            ]))
-            week_summary = html.Div(rows)
-
-        return greeting, week_summary
+    ]
