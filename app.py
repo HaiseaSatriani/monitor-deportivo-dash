@@ -52,8 +52,7 @@ app = dash.Dash(
         "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css",
     ],
     suppress_callback_exceptions=True,
-    prevent_initial_callbacks=True,      # ← CORRECCIÓN: evita que Dash v3 valide
-                                         #   IDs que aún no están en el layout
+    prevent_initial_callbacks=True,
 )
 app.title = "Athletica — Monitor Deportivo"
 server = app.server
@@ -98,8 +97,6 @@ app.layout = html.Div([
     html.Div(id="page-content"),
 
     # ── Ghost components: IDs usados en State/Output de callbacks ─
-    # Necesario para que Dash no falle al validar IDs que no estan
-    # en el layout raiz (estan en layouts de paginas internas).
     html.Div(id="_ghost", style={"display": "none"}, children=[
         # ── Athlete dashboard ──
         dcc.Upload(id="upload-ecg-inicio"),        dcc.Store(id="download-ecg-csv"),
@@ -154,6 +151,7 @@ app.layout = html.Div([
         html.Div(id="stat-time"),                html.Div(id="stat-cal-week"),
         html.Div(id="stat-avg-rpe"),
         html.Div(id="acwr-ratio-display"),       html.Div(id="acwr-status-label"),
+        html.Div(id="acwr-bar-container"),       # ← AÑADIDO: Output en load_metrics
         html.Div(id="total-calories-display"),   html.Div(id="macro-carbs-val"),
         html.Div(id="macro-protein-val"),        html.Div(id="macro-fat-val"),
         html.Div(id="macro-carbs-bar"),          html.Div(id="macro-protein-bar"),
@@ -204,6 +202,7 @@ app.layout = html.Div([
         html.Div(id="onboarding-current-step-title"),
         html.Div(id="onboarding-current-step-subtitle"),
         html.Div(id="onboarding-progress-bar"),
+        html.Div(id="onboarding-step-counter"),  # ← AÑADIDO: Output en navigate_step
         html.Button(id="onboarding-next-btn-visual", n_clicks=0),
         html.Button(id="onboarding-prev-btn-visual", n_clicks=0),
         html.Div(id="activity-level-indicator"),
