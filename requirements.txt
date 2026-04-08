@@ -7,3 +7,5 @@ plotly
 sqlalchemy
 werkzeug
 gunicorn
+flask          
+pytz           
