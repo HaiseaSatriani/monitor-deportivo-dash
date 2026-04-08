@@ -26,6 +26,15 @@ except Exception:
     except: pass
 # ═══════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════
+# PATH FIX — garantiza que el directorio raíz esté en sys.path
+# ═══════════════════════════════════════════════════════════
+import os as _os
+_root = _os.path.dirname(_os.path.abspath(__file__))
+if _root not in _sys.path:
+    _sys.path.insert(0, _root)
+# ═══════════════════════════════════════════════════════════
+
 import dash
 import dash_bootstrap_components as dbc
 from dash import html, dcc, Input, Output, State
